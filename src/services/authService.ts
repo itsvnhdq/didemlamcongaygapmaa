@@ -1,4 +1,3 @@
-
 export interface LoginCredentials {
   email: string;
   password: string;
@@ -28,7 +27,6 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  isEmailVerified: boolean;
   role: UserRole;
   phoneNumber?: string;
   dateOfBirth?: string;
@@ -60,9 +58,6 @@ export class AuthService {
   private listeners: AuthListener[] = [];
   private isLoading: boolean = false;
   private error: string | null = null;
-  // Add throttling state for resend functionality
-  private lastResendTime: number = 0;
-  private readonly RESEND_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
   private readonly apiBaseURL: string = "http://localhost:8000"; // Hardcoded to port 8000
 
   constructor() {
@@ -126,10 +121,6 @@ export class AuthService {
 
   getIsAuthenticated(): boolean {
     return this.isAuthenticated;
-  }
-
-  getIsEmailVerified(): boolean {
-    return this.user?.isEmailVerified || false;
   }
 
   getIsLoading(): boolean {
@@ -209,7 +200,7 @@ export class AuthService {
             errorMessage =
               "Account Access Denied: " +
               (data.message ||
-                "Your account may be suspended or require verification.");
+                "Your account may be suspended.");
             break;
           case 404:
             errorMessage =
@@ -239,7 +230,6 @@ export class AuthService {
           email: data.user.email,
           name: `${data.user.first_name || ''} ${data.user.last_name || ''}`.trim(),
           role: this.mapDjangoRoleToUserRole(data.user.role),
-          isEmailVerified: !!data.user.isEmailVerified,
         };
 
         this.setUser(user);
@@ -417,7 +407,6 @@ export class AuthService {
     password: string
   ): Promise<{
     isValid: boolean;
-    isVerified: boolean;
     userEmail?: string;
     userRole?: UserRole;
   }> {
@@ -433,17 +422,13 @@ export class AuthService {
 
       if (!response.ok) {
         console.log("Credential check failed - HTTP error:", response.status);
-        return { isValid: false, isVerified: false };
+        return { isValid: false };
       }
 
       const data = await response.json();
       console.log("Credential check response:", data);
 
-      // Handle the actual server response format: {message: 'Login successfully', result: {...}, redirectTo: '/admin'}
       if (data.message === "Login successfully" && data.redirectTo) {
-        // Admin/Staff always considered verified regardless of DB status
-        const isAdminOrStaff =
-          data.redirectTo === "/admin" || data.redirectTo === "/staff";
         const userRole =
           data.redirectTo === "/admin"
             ? UserRole.Admin
@@ -451,78 +436,29 @@ export class AuthService {
             ? UserRole.Staff
             : UserRole.User;
 
-        console.log("Credential check - Admin/Staff detection:", {
-          redirectTo: data.redirectTo,
-          isAdminOrStaff: isAdminOrStaff,
-          alwaysVerified: isAdminOrStaff,
-          userRole: userRole,
-        });
-
         return {
           isValid: true,
-          isVerified: true, // Always true for admin/staff
           userEmail: email,
           userRole: userRole,
         };
       }
 
       let user = data.user || data;
-      let isVerified = false; // Default to NOT verified for credential check
       let userRole = UserRole.User;
 
       if (user && typeof user === "object") {
-        // Determine role from user data
         userRole = this.mapServerRoleToEnum(user.role || "");
-        const isAdminOrStaff =
-          userRole === UserRole.Admin || userRole === UserRole.Staff;
-
-        if (isAdminOrStaff) {
-          // Admin/Staff NEVER need verification
-          isVerified = true;
-          console.log("Credential check - Admin/Staff user, always verified:", {
-            role: user.role,
-            userRole: userRole,
-          });
-        } else {
-          // Regular users MUST be verified in database
-          isVerified = this.isAccountVerified(user.verify);
-          console.log(
-            "Credential check - Regular user, checking verification:",
-            {
-              role: user.role,
-              userRole: userRole,
-              verify: user.verify,
-              isVerified: isVerified,
-            }
-          );
-        }
       }
 
       return {
         isValid: true,
-        isVerified: isVerified,
         userEmail: user?.email || email,
         userRole: userRole,
       };
     } catch (error) {
       console.error("Credential check error:", error);
-      return { isValid: false, isVerified: false };
+      return { isValid: false };
     }
-  }
-
-  // Helper method to check if account is verified
-  private isAccountVerified(verifyStatus: any): boolean {
-    // Handle different possible formats of verify status
-    if (typeof verifyStatus === 'boolean') {
-      return verifyStatus;
-    }
-    if (typeof verifyStatus === 'string') {
-      return verifyStatus.toLowerCase() === 'true' || verifyStatus === '1';
-    }
-    if (typeof verifyStatus === 'number') {
-      return verifyStatus === 1;
-    }
-    return false;
   }
 
   // Enhanced logout method
@@ -683,150 +619,9 @@ export class AuthService {
     this.notifyListeners();
   }
 
-  // ...existing methods...
-  updateVerificationStatus(verified: boolean): void {
-    try {
-      if (this.user) {
-        const updatedUser = { ...this.user, isEmailVerified: verified };
-        this.user = updatedUser;
-        localStorage.setItem("user", JSON.stringify(updatedUser));
-        localStorage.setItem("user_data", JSON.stringify(updatedUser));
-        this.notifyListeners();
-      }
-    } catch (error) {
-      console.error("Error updating verification status:", error);
-    }
-  }
-
-  // Enhanced resend method with 5-minute throttling
-  async resendVerificationEmail(email?: string): Promise<void> {
-    const now = Date.now();
-    const timeSinceLastResend = now - this.lastResendTime;
-
-    if (timeSinceLastResend < this.RESEND_COOLDOWN_MS) {
-      const remainingTime = Math.ceil(
-        (this.RESEND_COOLDOWN_MS - timeSinceLastResend) / 1000
-      );
-      throw new Error(
-        `Please wait ${Math.ceil(
-          remainingTime / 60
-        )} minutes before requesting another verification email.`
-      );
-    }
-
-    try {
-      const emailToUse = email || this.user?.email;
-      if (!emailToUse) {
-        throw new Error("No user email found");
-      }
-
-      console.log(
-        "🔄 Sending verification email resend request for:",
-        emailToUse
-      );
-
-      const apiURL = this.getApiURL("/api/verify/send-otp/");
-      
-      const response = await fetch(apiURL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Include authorization if user is logged in
-          ...(this.isAuthenticated && {
-            Authorization: `Bearer ${
-              localStorage.getItem("access_token") ||
-              localStorage.getItem("token")
-            }`,
-          }),
-        },
-        body: JSON.stringify({ email: emailToUse }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-
-        // Handle specific error cases
-        if (response.status === 429) {
-          throw new Error(
-            "Too many requests. Please wait before requesting another verification email."
-          );
-        } else if (response.status === 404) {
-          throw new Error("User not found. Please check your email address.");
-        } else if (response.status === 400) {
-          throw new Error(
-            errorData?.message || "Invalid request. Please try again."
-          );
-        } else if (response.status === 401) {
-          throw new Error("Authentication required. Please log in again.");
-        }
-
-        throw new Error(
-          errorData?.message ||
-            "Failed to resend verification email. Please try again later."
-        );
-      }
-
-      // Update throttling timestamp on successful request
-      this.lastResendTime = now;
-      console.log("✅ Verification email resend successful");
-
-      return await response.json();
-    } catch (error) {
-      console.error("❌ Error resending verification email:", error);
-      throw error;
-    }
-  }
-
-  // Get remaining cooldown time in seconds
-  getRemainingCooldownTime(): number {
-    const now = Date.now();
-    const timeSinceLastResend = now - this.lastResendTime;
-    const remainingTime = this.RESEND_COOLDOWN_MS - timeSinceLastResend;
-
-    return remainingTime > 0 ? Math.ceil(remainingTime / 1000) : 0;
-  }
-
-  // Check if resend is available
-  canResendVerificationEmail(): boolean {
-    return this.getRemainingCooldownTime() === 0;
-  }
-
-  async verifyEmail(token: string): Promise<any> {
-    try {
-      const verifyURL = this.getApiURL("/api/verify/email/");
-      
-      const response = await fetch(verifyURL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ token }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || "Email verification failed");
-      }
-
-      const result = await response.json();
-
-      if (this.user) {
-        this.updateVerificationStatus(true);
-      }
-
-      return result;
-    } catch (error) {
-      throw error;
-    }
-  }
-
   // Legacy methods for backward compatibility
   getCurrentUser(): User | null {
     return this.getUser();
-  }
-
-  updateUserVerificationStatus(verified: boolean): void {
-    this.updateVerificationStatus(verified);
   }
 }
 

@@ -1,4 +1,3 @@
-
 export class CleanupService {
   private static instance: CleanupService;
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -12,7 +11,7 @@ export class CleanupService {
     return CleanupService.instance;
   }
 
-  // Start automatic cleanup of expired unverified accounts
+  // Start automatic cleanup of expired data
   startCleanup(intervalMinutes: number = 60) {
     if (this.cleanupInterval) {
       this.stopCleanup();
@@ -20,7 +19,7 @@ export class CleanupService {
 
     this.cleanupInterval = setInterval(async () => {
       try {
-        await this.cleanupExpiredUnverifiedAccounts();
+        await this.cleanupExpiredData();
       } catch (error) {
         console.error('Cleanup failed:', error);
       }
@@ -37,9 +36,9 @@ export class CleanupService {
     }
   }
 
-  private async cleanupExpiredUnverifiedAccounts() {
+  private async cleanupExpiredData() {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/members/cleanup-expired-unverified`, {
+      const response = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api/cleanup/expired-data`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -57,7 +56,7 @@ export class CleanupService {
 
   // Manual cleanup trigger
   async triggerCleanup(): Promise<void> {
-    await this.cleanupExpiredUnverifiedAccounts();
+    await this.cleanupExpiredData();
   }
 }
 
