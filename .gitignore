@@ -1,0 +1,3 @@
+client/node_modules/
+client/public/.server-port.json
+node_modules
